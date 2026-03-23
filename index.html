@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>手势粒子交互体验</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            color: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #video-element {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 240px;
+            height: auto;
+            border-radius: 8px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.8);
+            z-index: 10;
+            transform: scaleX(-1);
+            background-color: #000;
+            pointer-events: none;
+        }
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 2;
+            pointer-events: none;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+        }
+        .status {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #00f0ff;
+        }
+        .tips {
+            font-size: 13px;
+            color: #ccc;
+            line-height: 1.6;
+            background: rgba(0,0,0,0.4);
+            padding: 10px 15px;
+            border-radius: 8px;
+            backdrop-filter: blur(2px);
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 10;
+            font-size: 20px;
+            text-align: center;
+            background: rgba(0,0,0,0.7);
+            padding: 20px 40px;
+            border-radius: 10px;
+            border: 1px solid #333;
+            backdrop-filter: blur(5px);
+        }
+        /* 全屏按钮样式 */
+        #fullscreen-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 10;
+            background: rgba(0, 240, 255, 0.1);
+            border: 1px solid #00f0ff;
+            color: #00f0ff;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(4px);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.2);
+            pointer-events: auto; /* 确保可以点击 */
+        }
+        #fullscreen-btn:hover {
+            background: rgba(0, 240, 255, 0.4);
+            color: #fff;
+            box-shadow: 0 0 15px rgba(0, 240, 255, 0.6);
+        }
+    </style>
+    
+    <!-- 引入 Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    
+    <!-- 引入 MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loading">
+        初始化中...<br>
+        <span style="font-size: 14px; color: #aaa; margin-top: 10px; display: inline-block;">
+            正在加载视觉模型及 1.png 到 14.png 的图片资源...<br>
+            请允许浏览器使用摄像头。
+        </span>
+    </div>
+
+    <div id="ui-layer">
+        <div class="status" id="gesture-status">等待识别...</div>
+        <div class="tips">
+            <b>【单手手势】</b><br>
+            • 空心拳(0) -> 图1 | 竖大拇指 -> 图3 | 实心拳 -> 图4<br>
+            • 伸出 1~5 根手指 -> 对应 图5 ~ 图9<br>
+            <b>【双手手势】</b><br>
+            • 双手比'0' -> 图2 | 双手比心 -> 粒子爱心<br>
+            • 伸出 6~10 根手指 -> 对应 图10 ~ 图14<br>
+            <b>【全局控制】</b> 张合手掌控制扩散，移动手掌控制旋转
+        </div>
+    </div>
+
+    <!-- 全屏按钮 -->
+    <button id="fullscreen-btn">全屏体验</button>
+
+    <video id="video-element" autoplay playsinline></video>
+    <div id="canvas-container"></div>
+
+    <script>
+        // ==========================================
+        // 1. 全局配置与状态
+        // ==========================================
+        const PARTICLE_COUNT = 15000; 
+        const SNOW_COUNT = 2000;      
+        
+        let scene, camera, renderer;
+        let mainParticleSystem, snowParticleSystem;
+        let mainGroup; 
+        
+        // 动态生成包含 random, shapeHeart 以及 shape1~shape14 的目标数组
+        const shapes = {
+            random: new Float32Array(PARTICLE_COUNT * 3),
+            shapeHeart: new Float32Array(PARTICLE_COUNT * 3)
+        };
+        for(let i = 1; i <= 14; i++) {
+            shapes[`shape${i}`] = new Float32Array(PARTICLE_COUNT * 3);
+        }
+        
+        let currentShape = 'random';
+        let targetSpread = 1.0; 
+        let targetRotX = 0;     
+        let targetRotY = 0;     
+
+        // ==========================================
+        // 全屏交互逻辑
+        // ==========================================
+        function toggleFullScreen() {
+            const btn = document.getElementById('fullscreen-btn');
+            if (!document.fullscreenElement && !document.webkitFullscreenElement && !document.msFullscreenElement) {
+                // 进入全屏
+                const docElm = document.documentElement;
+                if (docElm.requestFullscreen) {
+                    docElm.requestFullscreen();
+                } else if (docElm.webkitRequestFullscreen) { // Chrome, Safari
+                    docElm.webkitRequestFullscreen();
+                } else if (docElm.msRequestFullscreen) { // IE11
+                    docElm.msRequestFullscreen();
+                }
+                btn.innerText = "退出全屏";
+            } else {
+                // 退出全屏
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                } else if (document.msExitFullscreen) {
+                    document.msExitFullscreen();
+                }
+                btn.innerText = "全屏体验";
+            }
+        }
+
+        // 监听退出全屏事件（比如用户按 Esc 键）更新按钮文字
+        ['fullscreenchange', 'webkitfullscreenchange', 'msfullscreenchange'].forEach(eventType => {
+            document.addEventListener(eventType, () => {
+                const btn = document.getElementById('fullscreen-btn');
+                if (!document.fullscreenElement && !document.webkitFullscreenElement && !document.msFullscreenElement) {
+                    btn.innerText = "全屏体验";
+                } else {
+                    btn.innerText = "退出全屏";
+                }
+            });
+        });
+
+        document.getElementById('fullscreen-btn').addEventListener('click', toggleFullScreen);
+
+        // ==========================================
+        // 2. 初始化 Three.js 场景
+        // ==========================================
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+            
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.02); 
+            
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 30;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            mainGroup = new THREE.Group();
+            scene.add(mainGroup);
+
+            const particleTexture = createGlowTexture();
+
+            const mainMaterial = new THREE.PointsMaterial({
+                size: 0.4, 
+                color: 0xffffff,
+                map: particleTexture,
+                transparent: true,
+                opacity: 0.9,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            const mainGeometry = new THREE.BufferGeometry();
+            const initialPositions = new Float32Array(PARTICLE_COUNT * 3);
+            for(let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                initialPositions[i] = (Math.random() - 0.5) * 40;
+                shapes.random[i] = initialPositions[i]; 
+            }
+            mainGeometry.setAttribute('position', new THREE.BufferAttribute(initialPositions, 3));
+            mainParticleSystem = new THREE.Points(mainGeometry, mainMaterial);
+            mainGroup.add(mainParticleSystem);
+
+            // 初始化背景雪花
+            const snowGeometry = new THREE.BufferGeometry();
+            const snowPositions = new Float32Array(SNOW_COUNT * 3);
+            for(let i = 0; i < SNOW_COUNT * 3; i+=3) {
+                snowPositions[i] = (Math.random() - 0.5) * 100;   
+                snowPositions[i+1] = (Math.random() - 0.5) * 100; 
+                snowPositions[i+2] = (Math.random() - 0.5) * 50 - 20;  
+            }
+            snowGeometry.setAttribute('position', new THREE.BufferAttribute(snowPositions, 3));
+            const snowMaterial = new THREE.PointsMaterial({
+                size: 0.3,
+                color: 0x88ccff, 
+                map: particleTexture,
+                transparent: true,
+                opacity: 0.5,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+            snowParticleSystem = new THREE.Points(snowGeometry, snowMaterial);
+            scene.add(snowParticleSystem);
+
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function createGlowTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            gradient.addColorStop(0.2, 'rgba(255, 255, 255, 0.8)');
+            gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.2)');
+            gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, 64, 64);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // ==========================================
+        // 3. 图像处理与特定形状生成 (核心逻辑)
+        // ==========================================
+        async function extractPositionsFromImage(imageSrc, targetArray, fallbackShapeType) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.crossOrigin = "Anonymous";
+                
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    const size = 400; 
+                    canvas.width = size;
+                    canvas.height = size;
+                    
+                    ctx.drawImage(img, 0, 0, size, size);
+                    const imageData = ctx.getImageData(0, 0, size, size).data;
+                    
+                    const validPixels = [];
+                    for (let y = 0; y < size; y++) {
+                        for (let x = 0; x < size; x++) {
+                            const index = (y * size + x) * 4;
+                            const alpha = imageData[index + 3];
+                            const brightness = (imageData[index] + imageData[index+1] + imageData[index+2]) / 3;
+                            
+                            // 剔除高亮度的白底像素，保留深色的文字/线条像素
+                            if (alpha > 50 && brightness < 150) {
+                                validPixels.push({
+                                    x: (x - size / 2) / 16,
+                                    y: -(y - size / 2) / 16 
+                                });
+                            }
+                        }
+                    }
+
+                    if (validPixels.length === 0) {
+                        generateFallbackShape(targetArray, fallbackShapeType);
+                        return resolve();
+                    }
+
+                    for (let i = 0; i < PARTICLE_COUNT; i++) {
+                        const pixel = validPixels[Math.floor(Math.random() * validPixels.length)];
+                        const idx = i * 3;
+                        targetArray[idx] = pixel.x + (Math.random() - 0.5) * 0.04;     
+                        targetArray[idx + 1] = pixel.y + (Math.random() - 0.5) * 0.04;
+                        targetArray[idx + 2] = (Math.random() - 0.5) * 0.1;             
+                    }
+                    resolve();
+                };
+
+                img.onerror = () => {
+                    // 如果图片加载失败，使用备用的几何体兜底展示
+                    generateFallbackShape(targetArray, fallbackShapeType);
+                    resolve();
+                };
+
+                img.src = imageSrc;
+            });
+        }
+
+        // 生成 3D 爱心坐标阵列
+        function generateHeartShape(targetArray) {
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const idx = i * 3;
+                const t = Math.random() * Math.PI * 2;
+                // 爱心参数方程
+                const x = 16 * Math.pow(Math.sin(t), 3);
+                const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+                
+                // 缩放并加入Z轴厚度噪点
+                targetArray[idx] = x * 0.6 + (Math.random() - 0.5) * 0.4;
+                targetArray[idx + 1] = y * 0.6 + (Math.random() - 0.5) * 0.4;
+                targetArray[idx + 2] = (Math.random() - 0.5) * 1.5;
+            }
+        }
+
+        function generateFallbackShape(targetArray, type) {
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const idx = i * 3;
+                if (type === 'sphere') {
+                    const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+                    const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+                    const r = 10;
+                    targetArray[idx] = r * Math.cos(theta) * Math.sin(phi);
+                    targetArray[idx+1] = r * Math.sin(theta) * Math.sin(phi);
+                    targetArray[idx+2] = r * Math.cos(phi);
+                } else if (type === 'box') {
+                    targetArray[idx] = (Math.random() > 0.5 ? 1 : -1) * (Math.random() * 8);
+                    targetArray[idx+1] = (Math.random() > 0.5 ? 1 : -1) * (Math.random() * 8);
+                    targetArray[idx+2] = (Math.random() > 0.5 ? 1 : -1) * (Math.random() * 8);
+                } else {
+                    const u = Math.random() * Math.PI * 2;
+                    const v = Math.random() * Math.PI * 2;
+                    const R = 8, r = 3;
+                    targetArray[idx] = (R + r * Math.cos(v)) * Math.cos(u);
+                    targetArray[idx+1] = (R + r * Math.cos(v)) * Math.sin(u);
+                    targetArray[idx+2] = r * Math.sin(v);
+                }
+            }
+        }
+
+        // ==========================================
+        // 4. 手势识别与逻辑控制 (MediaPipe 高阶双手算法)
+        // ==========================================
+        function initMediaPipe() {
+            const videoElement = document.getElementById('video-element');
+            const hands = new Hands({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                }
+            });
+
+            hands.setOptions({
+                maxNumHands: 2, 
+                modelComplexity: 1,
+                minDetectionConfidence: 0.7,
+                minTrackingConfidence: 0.7
+            });
+
+            hands.onResults(onHandResults);
+
+            const camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({image: videoElement});
+                },
+                width: 640,
+                height: 480
+            });
+            
+            camera.start().then(() => {
+                document.getElementById('loading').style.display = 'none';
+            }).catch(err => {
+                document.getElementById('loading').innerHTML = "摄像头启动失败，请检查权限！<br>" + err.message;
+            });
+        }
+
+        // 计算两点之间的空间距离
+        function getDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow((p1.z || 0) - (p2.z || 0), 2));
+        }
+
+        // 判断指定手指是否伸出 (利用指尖到手腕的距离 > 指节到手腕的距离)
+        function isFingerUp(landmarks, tipIdx, pipIdx) {
+            const dTip = getDistance(landmarks[tipIdx], landmarks[0]);
+            const dPip = getDistance(landmarks[pipIdx], landmarks[0]);
+            return dTip > dPip;
+        }
+
+        // 精确分析单只手的姿态数据
+        function analyzeHand(lm) {
+            let count = 0;
+            // 检查 食指(8), 中指(12), 无名指(16), 小指(20)
+            if (isFingerUp(lm, 8, 6)) count++;
+            if (isFingerUp(lm, 12, 10)) count++;
+            if (isFingerUp(lm, 16, 14)) count++;
+            if (isFingerUp(lm, 20, 18)) count++;
+
+            // 大拇指判定(横向或纵向延伸)：对比指尖与指节到小指根部(17)的距离
+            const dThumbTip = getDistance(lm[4], lm[17]);
+            const dThumbIp = getDistance(lm[3], lm[17]);
+            const isThumbExtended = dThumbTip > dThumbIp + 0.02;
+            if (isThumbExtended) count++;
+
+            // 高阶判定系数
+            const dIndexTipWrist = getDistance(lm[8], lm[0]);
+            const dIndexMcpWrist = getDistance(lm[5], lm[0]);
+            const curlRatio = dIndexTipWrist / dIndexMcpWrist; // 判断手指卷曲程度
+            const dThumbIndex = getDistance(lm[4], lm[8]);     // 大拇指与食指的距离
+
+            // 实心拳：全部手指紧紧卷曲进入手心
+            const isFist = curlRatio < 1.1 && count === 0;
+
+            // 空心拳('0'手势)：大拇指与食指指尖贴合，且非实心拳
+            const isZero = dThumbIndex < 0.08 && curlRatio >= 1.1 && count <= 2;
+
+            // 竖大拇指：只有大拇指伸出，其他手指紧紧卷曲
+            const isThumbsUp = isThumbExtended && !isFingerUp(lm, 8, 6) && !isFingerUp(lm, 12, 10) && !isFingerUp(lm, 16, 14) && !isFingerUp(lm, 20, 18);
+
+            return { count, isFist, isZero, isThumbsUp, lm };
+        }
+
+        function onHandResults(results) {
+            const statusEl = document.getElementById('gesture-status');
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                let totalFingers = 0;
+                let handsInfo = [];
+                let avgX = 0, avgY = 0;
+
+                // 遍历识别到的每一只手
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const lm = results.multiHandLandmarks[i];
+                    const info = analyzeHand(lm);
+                    handsInfo.push(info);
+                    totalFingers += info.count;
+
+                    avgX += lm[9].x - 0.5;
+                    avgY += lm[9].y - 0.5;
+                }
+
+                // 计算控制旋转和扩散的基础参数
+                targetRotY = (avgX / handsInfo.length) * Math.PI;
+                targetRotX = (avgY / handsInfo.length) * Math.PI;
+                const wrist = handsInfo[0].lm[0];
+                const middleTip = handsInfo[0].lm[12];
+                targetSpread = 0.5 + getDistance(wrist, middleTip) * 3.5;
+
+                let detectedShape = 'random';
+                let statusText = "识别中...";
+                let statusColor = "#00f0ff";
+
+                // --- 核心手势逻辑 ---
+                if (handsInfo.length === 2) {
+                    const h1 = handsInfo[0].lm;
+                    const h2 = handsInfo[1].lm;
+                    
+                    const thumbDist = getDistance(h1[4], h2[4]);
+                    const indexDist = getDistance(h1[8], h2[8]);
+
+                    // 【更新】双手都比'0' (两个空心圈)
+                    if (handsInfo[0].isZero && handsInfo[1].isZero) {
+                        detectedShape = 'shape2';
+                        statusText = "双手比'0' -> 图片2";
+                        statusColor = "#ffeb3b";
+                    } 
+                    // 双手比爱心：双大拇指靠近、双食指靠近，且大拇指在食指下方(Y值更大)
+                    else if (thumbDist < 0.1 && indexDist < 0.1 && h1[4].y > h1[8].y) {
+                        detectedShape = 'shapeHeart';
+                        statusText = "双手比爱心 -> 粒子爱心";
+                        statusColor = "#e91e63";
+                    } 
+                    // 双手累计伸出 6 ~ 10 根手指
+                    else if (totalFingers >= 6 && totalFingers <= 10) {
+                        detectedShape = 'shape' + (totalFingers + 4);
+                        statusText = `伸出 ${totalFingers} 根手指 -> 图片${totalFingers + 4}`;
+                        statusColor = "#4caf50";
+                    } 
+                    else {
+                        // 降级使用主手的单手逻辑
+                        const single = evaluateSingleHand(handsInfo[0]);
+                        detectedShape = single.shape; statusText = single.text; statusColor = single.color;
+                    }
+                } else {
+                    // 单手状态判定
+                    const single = evaluateSingleHand(handsInfo[0]);
+                    detectedShape = single.shape; statusText = single.text; statusColor = single.color;
+                }
+
+                currentShape = detectedShape;
+                statusEl.innerText = statusText;
+                statusEl.style.color = statusColor;
+
+            } else {
+                currentShape = 'random';
+                targetSpread = 1.0;
+                targetRotX = 0;
+                targetRotY = 0;
+                statusEl.innerText = "未检测到手部";
+                statusEl.style.color = "#fff";
+            }
+        }
+
+        // 解析单手姿势并映射到对应的形状
+        function evaluateSingleHand(info) {
+            if (info.isZero) return { shape: 'shape1', text: "空心拳(0) -> 图片1", color: "#ffeb3b" };
+            if (info.isThumbsUp) return { shape: 'shape3', text: "竖大拇指 -> 图片3", color: "#03a9f4" };
+            if (info.isFist) return { shape: 'shape4', text: "实心拳头 -> 图片4", color: "#f44336" };
+
+            if (info.count >= 1 && info.count <= 5) {
+                return {
+                    shape: 'shape' + (info.count + 4),
+                    text: `伸出 ${info.count} 根手指 -> 图片${info.count + 4}`,
+                    color: "#8bc34a"
+                };
+            }
+            return { shape: 'random', text: "手势：控制扩散/旋转", color: "#00f0ff" };
+        }
+
+        // ==========================================
+        // 5. 渲染与动画循环 (平滑过渡核心)
+        // ==========================================
+        function animate() {
+            requestAnimationFrame(animate);
+
+            mainGroup.rotation.x += (targetRotX - mainGroup.rotation.x) * 0.08;
+            mainGroup.rotation.y += (targetRotY - mainGroup.rotation.y) * 0.08;
+            const currentScale = mainGroup.scale.x;
+            const newScale = currentScale + (targetSpread - currentScale) * 0.1;
+            mainGroup.scale.set(newScale, newScale, newScale);
+
+            const positions = mainParticleSystem.geometry.attributes.position.array;
+            const targetPositions = shapes[currentShape];
+            
+            for(let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                positions[i] += (targetPositions[i] - positions[i]) * 0.06; 
+            }
+            mainParticleSystem.geometry.attributes.position.needsUpdate = true;
+
+            const snowPositions = snowParticleSystem.geometry.attributes.position.array;
+            for(let i = 1; i < SNOW_COUNT * 3; i += 3) {
+                snowPositions[i] -= 0.15; 
+                snowPositions[i-1] += Math.sin(Date.now() * 0.001 + i) * 0.02; 
+                if (snowPositions[i] < -50) snowPositions[i] = 50;
+            }
+            snowParticleSystem.geometry.attributes.position.needsUpdate = true;
+            snowParticleSystem.rotation.y += 0.001; 
+
+            renderer.render(scene, camera);
+        }
+
+        // ==========================================
+        // 6. 启动程序
+        // ==========================================
+        window.onload = async () => {
+            initThree();
+            
+            // 准备数学回退几何体数组，防止图片未加载时崩溃
+            const fallbackTypes = ['sphere', 'box', 'torus'];
+            const loadPromises = [];
+            
+            // 批量并行加载 1.png 到 14.png
+            for(let i = 1; i <= 14; i++) {
+                loadPromises.push(
+                    extractPositionsFromImage(`${i}.png`, shapes[`shape${i}`], fallbackTypes[i % 3])
+                );
+            }
+            await Promise.all(loadPromises);
+            
+            // 预生成内置爱心数学图案
+            generateHeartShape(shapes.shapeHeart);
+            
+            initMediaPipe();
+            animate();
+        };
+
+    </script>
+</body>
+</html>
